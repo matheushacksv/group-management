@@ -2,20 +2,82 @@
 import type { NavigationMenuItem } from '@nuxt/ui'
 
 const { user, clear } = useUserSession()
-const { data: groups } = await useGroups()
+const toast = useToast()
+const { data: groups, refresh: refreshGroups } = await useGroups()
+const { data: active, refresh: refreshActive } = await useActiveRemovals()
+
+const pendingByGroup = computed(() => {
+  const map = new Map<string, number>()
+  for (const r of active.value) {
+    map.set(r.groupId, (map.get(r.groupId) ?? 0) + r.pending)
+  }
+  return map
+})
 
 const items = computed<NavigationMenuItem[][]>(() => {
   const managed = groups.value.filter(g => g.managed)
   return [
-    [{ label: 'Todos os grupos', icon: 'i-lucide-layout-grid', to: '/', exact: true }],
+    [
+      { label: 'Todos os grupos', icon: 'i-lucide-layout-grid', to: '/', exact: true },
+      { label: 'Buscar pessoa', icon: 'i-lucide-search', to: '/people' }
+    ],
     managed.length
       ? [
           { label: 'Gerenciados', type: 'label' },
-          ...managed.map(g => ({ label: g.name, icon: 'i-lucide-message-circle', to: `/groups/${g.id}` }))
+          ...managed.map((g) => {
+            const pending = pendingByGroup.value.get(g.id)
+            return {
+              label: g.name,
+              icon: pending ? 'i-lucide-loader' : 'i-lucide-message-circle',
+              to: `/groups/${g.id}`,
+              badge: pending ? { label: String(pending), color: 'warning' as const, variant: 'subtle' as const } : undefined,
+              tooltip: pending ? { text: `${pending} remoção(ões) em andamento` } : undefined
+            }
+          })
         ]
       : []
   ]
 })
+
+// polls the running removals: feeds the sidebar badges and notices when one finishes
+const known = ref(new Set(active.value.map(r => r.id)))
+let timer: ReturnType<typeof setInterval> | undefined
+onMounted(() => {
+  timer = setInterval(async () => {
+    await refreshActive()
+    const now = new Set(active.value.map(r => r.id))
+    for (const id of known.value) {
+      if (!now.has(id)) await notifyFinished(id)
+    }
+    known.value = now
+  }, 10_000)
+})
+onUnmounted(() => clearInterval(timer))
+
+async function notifyFinished(id: number) {
+  try {
+    const job = await $fetch<RemovalDetail>(`/api/go/removals/${id}`)
+    const ok = job.counts.ok ?? 0
+    const failed = job.counts.failed ?? 0
+    const canceled = job.counts.canceled ?? 0
+    const parts = [`${ok} removido(s)`]
+    if (failed) parts.push(`${failed} falha(s)`)
+    if (canceled) parts.push(`${canceled} cancelada(s)`)
+
+    toast.add({
+      title: job.closeGroup && !canceled ? `Grupo encerrado (remoção #${id})` : `Remoção #${id} concluída`,
+      description: parts.join(', '),
+      color: failed ? 'warning' : 'success',
+      icon: failed ? 'i-lucide-triangle-alert' : 'i-lucide-check',
+      duration: 10_000,
+      actions: [{ label: 'Ver', variant: 'outline', onClick: () => { navigateTo(`/removals/${id}`) } }]
+    })
+    // a closing changes the group list (closed groups stop being managed)
+    if (job.closeGroup) await refreshGroups()
+  } catch {
+    // the notice is a nice-to-have, a failed fetch is not worth an error
+  }
+}
 
 async function logout() {
   await clear()

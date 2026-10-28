@@ -128,6 +128,12 @@ func (g GroupHandler) Webhook(c *gin.Context) {
 		return
 	}
 
+	if ev.Event == "message.received" {
+		g.saveSenderName(c.Request.Context(), ev)
+		c.Status(http.StatusOK)
+		return
+	}
+
 	if ev.Event != "group.join" && ev.Event != "group.leave" {
 		c.Status(http.StatusOK)
 		return
@@ -252,6 +258,41 @@ func (g GroupHandler) SyncGroup(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+// saveSenderName stores the name of who sent a message in a managed group.
+// WhatsApp only exposes the name of people who interact, so names fill up as members talk.
+// Errors are only logged: a missing name is not worth an OpenWA retry
+func (g GroupHandler) saveSenderName(ctx context.Context, ev WebhookEvent) {
+	d := ev.Data
+	if !d.IsGroup || d.FromMe || d.Author == "" {
+		return
+	}
+	// ponytail: members are keyed by @c.us; @lid senders are skipped until LIDs show up in the groups
+	if !strings.HasSuffix(d.Author, "@c.us") {
+		return
+	}
+
+	name := d.Contact.PushName
+	if name == "" {
+		name = d.Contact.Name
+	}
+	if name == "" {
+		return
+	}
+
+	managed, err := IsManaged(ctx, g.Pool, d.ChatID)
+	if err != nil {
+		log.Printf("webhook sender managed: %v", err)
+		return
+	}
+	if !managed {
+		return
+	}
+
+	if err := UpdatePushName(ctx, g.Pool, d.Author, name); err != nil {
+		log.Printf("webhook sender name %s: %v", d.Author, err)
+	}
+}
+
 // Members get from database members of the group
 func (g GroupHandler) Members(c *gin.Context) {
 	minDays, err := strconv.Atoi(c.DefaultQuery("min_days", "0"))
@@ -373,6 +414,7 @@ func (g GroupHandler) CreateRemoval(c *gin.Context) {
 		groupID,
 		c.GetHeader("X-Actor"),
 		queue,
+		false,
 	)
 	if err != nil {
 		log.Printf("removal create: %v", err)
@@ -409,7 +451,7 @@ func (g GroupHandler) GetRemoval(c *gin.Context) {
 		counts[it.Status]++
 	}
 
-	createdAt, requestedBy, err := RemovalJobInfo(c.Request.Context(), g.Pool, jobID)
+	createdAt, requestedBy, closeGroup, err := RemovalJobInfo(c.Request.Context(), g.Pool, jobID)
 	if err != nil {
 		log.Printf("removal info: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
@@ -420,9 +462,125 @@ func (g GroupHandler) GetRemoval(c *gin.Context) {
 		"jobId":       jobID,
 		"createdAt":   createdAt,
 		"requestedBy": requestedBy,
+		"closeGroup":  closeGroup,
 		"counts":      counts,
 		"items":       items,
 	})
+}
+
+// ActiveRemovals handles http and lists the removals still running (sidebar indicator and finish notice)
+func (g GroupHandler) ActiveRemovals(c *gin.Context) {
+	active, err := ActiveRemovals(c.Request.Context(), g.Pool)
+	if err != nil {
+		log.Printf("removals active: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	c.JSON(http.StatusOK, active)
+}
+
+// SearchPeople handles http and finds members across all groups by number or name
+func (g GroupHandler) SearchPeople(c *gin.Context) {
+	q := strings.TrimSpace(c.Query("q"))
+	if len([]rune(q)) < 2 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "busca precisa de ao menos 2 caracteres"})
+		return
+	}
+
+	people, err := SearchPeople(c.Request.Context(), g.Pool, q)
+	if err != nil {
+		log.Printf("people search: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	if people == nil {
+		people = []Person{}
+	}
+	c.JSON(http.StatusOK, people)
+}
+
+// CloseGroup handles http and closes a group: removes everybody (admins included) through the
+// removal queue and, when it finishes without cancel, the bot leaves the group.
+// WhatsApp doesn't let anyone remove the group creator, so the creator stays
+func (g GroupHandler) CloseGroup(c *gin.Context) {
+	ctx := c.Request.Context()
+	sessionID, groupID := c.Param("sessionID"), c.Param("groupID")
+
+	managed, err := IsManaged(ctx, g.Pool, groupID)
+	if err != nil {
+		log.Printf("close managed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	if !managed {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "group is not managed"})
+		return
+	}
+
+	running, err := HasPendingRemoval(ctx, g.Pool, groupID)
+	if err != nil {
+		log.Printf("close pending: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	if running {
+		c.JSON(http.StatusConflict, gin.H{"error": "há uma remoção em andamento neste grupo, aguarde ou cancele"})
+		return
+	}
+
+	phone, err := g.WA.SessionPhone(sessionID)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	botID := phone + "@c.us"
+
+	group, err := g.WA.GetGroup(sessionID, groupID)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+
+	var queue []string
+	kept := []gin.H{}
+	botIsAdmin := false
+	for _, p := range group.Participants {
+		switch {
+		case p.ID == botID:
+			botIsAdmin = p.IsAdmin || p.IsSuperAdmin
+		case p.IsSuperAdmin:
+			kept = append(kept, gin.H{"id": p.ID, "reason": "criador do grupo"})
+		default:
+			queue = append(queue, p.ID)
+		}
+	}
+	if !botIsAdmin {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "o bot precisa ser admin do grupo para encerrá-lo"})
+		return
+	}
+
+	// nobody to remove: leave right away
+	if len(queue) == 0 {
+		if err := g.WA.LeaveGroup(sessionID, groupID); err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		if err := MarkGroupClosed(ctx, g.Pool, groupID); err != nil {
+			log.Printf("close mark: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"closed": true, "queued": 0, "kept": kept})
+		return
+	}
+
+	jobID, err := CreateRemovalJob(ctx, g.Pool, sessionID, groupID, c.GetHeader("X-Actor"), queue, true)
+	if err != nil {
+		log.Printf("close create: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"jobId": jobID, "queued": len(queue), "kept": kept})
 }
 
 // CancelRemoval handles http and cancels the pending items of a removal job

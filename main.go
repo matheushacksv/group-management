@@ -66,8 +66,11 @@ func main() {
 	protected.GET("/groups/:sessionID/:groupID/members/returned", groupHandler.Returned)
 	protected.POST("/groups/:sessionID/:groupID/removals", groupHandler.CreateRemoval)
 	protected.GET("/groups/:sessionID/:groupID/removals", groupHandler.ListRemovals)
+	protected.POST("/groups/:sessionID/:groupID/close", groupHandler.CloseGroup)
+	protected.GET("/removals/active", groupHandler.ActiveRemovals)
 	protected.GET("/removals/:id", groupHandler.GetRemoval)
 	protected.POST("/removals/:id/cancel", groupHandler.CancelRemoval)
+	protected.GET("/members/search", groupHandler.SearchPeople)
 
 
 	// ctx is canceled on Ctrl+C (SIGINT) or on stop from docker/systemd (SIGTERM)

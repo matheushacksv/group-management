@@ -29,6 +29,11 @@ const returnedColumns: TableColumn<ReturnedMember>[] = [
   { accessorKey: 'lastJoin', header: 'Voltou' }
 ]
 
+const closeOpen = ref(false)
+const actions = computed(() => [[
+  { label: 'Encerrar grupo', icon: 'i-lucide-power', color: 'error' as const, onSelect: () => { closeOpen.value = true } }
+]])
+
 const jobColumns: TableColumn<RemovalJob>[] = [
   { accessorKey: 'id', header: '#' },
   { accessorKey: 'createdAt', header: 'Criada' },
@@ -46,9 +51,16 @@ const jobColumns: TableColumn<RemovalJob>[] = [
           <UButton to="/" icon="i-lucide-arrow-left" color="neutral" variant="ghost" aria-label="Voltar para grupos" />
         </template>
         <template #trailing>
-          <UBadge v-if="group && !group.managed" color="warning" variant="subtle" label="Não gerenciado" />
+          <UBadge v-if="group?.closedAt" color="neutral" variant="subtle" icon="i-lucide-power" label="Encerrado" />
+          <UBadge v-else-if="group && !group.managed" color="warning" variant="subtle" label="Não gerenciado" />
+        </template>
+        <template #right>
+          <UDropdownMenu v-if="group?.managed && !group.closedAt" :items="actions" :content="{ align: 'end' }">
+            <UButton icon="i-lucide-ellipsis-vertical" color="neutral" variant="ghost" aria-label="Mais ações" />
+          </UDropdownMenu>
         </template>
       </UDashboardNavbar>
+      <CloseGroupModal v-if="group" v-model:open="closeOpen" :group="group" />
     </template>
 
     <template #body>

@@ -22,10 +22,21 @@ type WebhookEvent struct {
 	Event          string `json:"event"`
 	IdempotencyKey string `json:"idempotencyKey"`
 	Data           struct {
+		// group.join / group.leave
 		GroupID        string   `json:"groupId"`
 		ParticipantIDs []string `json:"participantIds"`
 		Timestamp      int64    `json:"timestamp"`
 		ActorID        string   `json:"actorId"`
+
+		// message.received: only who sent it is used, the message content is never read
+		ChatID  string `json:"chatId"`
+		Author  string `json:"author"`
+		IsGroup bool   `json:"isGroup"`
+		FromMe  bool   `json:"fromMe"`
+		Contact struct {
+			Name     string `json:"name"`
+			PushName string `json:"pushName"`
+		} `json:"contact"`
 	} `json:"data"`
 }
 
@@ -63,6 +74,33 @@ type StoredGroup struct {
 	Name     string     `json:"name"`
 	Managed  bool       `json:"managed"`
 	SyncedAt *time.Time `json:"syncedAt,omitempty"`
+	ClosedAt *time.Time `json:"closedAt,omitempty"`
+}
+
+type ActiveRemoval struct {
+	ID         int64  `json:"id"`
+	GroupID    string `json:"groupId"`
+	CloseGroup bool   `json:"closeGroup"`
+	Pending    int64  `json:"pending"`
+}
+
+type Closing struct {
+	SessionID string
+	GroupID   string
+}
+
+type Person struct {
+	ID       string        `json:"id"`
+	Number   string        `json:"number"`
+	PushName *string       `json:"pushName,omitempty"`
+	Groups   []PersonGroup `json:"groups"`
+}
+
+type PersonGroup struct {
+	GroupID string    `json:"groupId"`
+	Name    string    `json:"name"`
+	Present bool      `json:"present"`
+	Since   time.Time `json:"since"`
 }
 
 type Contact struct {

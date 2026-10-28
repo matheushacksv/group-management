@@ -61,7 +61,8 @@ func (w Worker) next(ctx context.Context) (bool, error) {
 		`,
 	).Scan(&itemID, &memberID, &sessionID, &groupID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+		// queue empty: finish the closings whose removals are done
+		return false, w.finishClosings(ctx)
 	}
 	if err != nil {
 		return false, err
@@ -89,4 +90,25 @@ func (w Worker) next(ctx context.Context) (bool, error) {
 		return true, err
 	}
 	return true, tx.Commit(ctx)
+}
+
+// finishClosings makes the bot leave the groups whose close removal finished without cancel.
+// A failed leave keeps the group open and is retried on the next idle loop
+func (w Worker) finishClosings(ctx context.Context) error {
+	closings, err := ClosingsReady(ctx, w.Pool)
+	if err != nil {
+		return err
+	}
+
+	for _, cl := range closings {
+		if err := w.WA.LeaveGroup(cl.SessionID, cl.GroupID); err != nil {
+			log.Printf("worker close %s: %v", cl.GroupID, err)
+			continue
+		}
+		if err := MarkGroupClosed(ctx, w.Pool, cl.GroupID); err != nil {
+			return err
+		}
+		log.Printf("worker: group %s closed", cl.GroupID)
+	}
+	return nil
 }

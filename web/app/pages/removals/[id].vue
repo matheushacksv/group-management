@@ -63,7 +63,7 @@ const columns: TableColumn<RemovalItem>[] = [
 <template>
   <UDashboardPanel :id="`removal-${jobId}`">
     <template #header>
-      <UDashboardNavbar :title="`Remoção #${jobId}`">
+      <UDashboardNavbar :title="job?.closeGroup ? `Encerramento #${jobId}` : `Remoção #${jobId}`">
         <template #leading>
           <UButton
             :to="groupId ? `/groups/${groupId}` : '/'"
@@ -115,6 +115,16 @@ const columns: TableColumn<RemovalItem>[] = [
           <p v-if="pending > 0" class="text-sm text-muted">
             Processando 1 pessoa a cada 3 a 6 segundos para evitar bloqueio. Pode fechar a página, a fila continua.
           </p>
+          <UAlert
+            v-if="job.closeGroup"
+            :color="canceled ? 'warning' : 'info'"
+            variant="subtle"
+            icon="i-lucide-power"
+            :title="canceled ? 'Encerramento cancelado: o bot continua no grupo' : 'Encerramento do grupo'"
+            :description="canceled
+              ? 'Quem já saiu não volta. O grupo continua ativo com quem sobrou.'
+              : 'Ao terminar a fila, o bot sai do grupo automaticamente e ele é marcado como encerrado.'"
+          />
         </div>
 
         <UTable :data="job.items" :columns="columns">

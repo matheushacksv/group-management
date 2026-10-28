@@ -5,6 +5,44 @@ export interface StoredGroup {
   name: string
   managed: boolean
   syncedAt?: string
+  closedAt?: string
+}
+
+export interface ActiveRemoval {
+  id: number
+  groupId: string
+  closeGroup: boolean
+  pending: number
+}
+
+export interface Person {
+  id: string
+  number: string
+  pushName?: string
+  groups: {
+    groupId: string
+    name: string
+    present: boolean
+    since: string
+  }[]
+}
+
+export interface CloseGroupResponse {
+  jobId?: number
+  closed?: boolean
+  queued: number
+  kept: Skipped[]
+}
+
+export interface Group {
+  id: string
+  name: string
+  participants?: {
+    id: string
+    number: string
+    isAdmin: boolean
+    isSuperAdmin: boolean
+  }[]
 }
 
 export interface Member {
@@ -44,6 +82,7 @@ export interface RemovalDetail {
   jobId: number
   createdAt: string
   requestedBy?: string | null
+  closeGroup: boolean
   counts: Partial<Record<RemovalItem['status'], number>>
   items: RemovalItem[]
 }

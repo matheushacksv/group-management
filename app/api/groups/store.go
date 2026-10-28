@@ -2,6 +2,7 @@ package groups
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -43,11 +44,21 @@ func SaveMember(ctx context.Context, pool *pgxpool.Pool, p Participant, pushName
 	return err
 }
 
+// UpdatePushName sets the name of a known member, skipping the write when it didn't change
+func UpdatePushName(ctx context.Context, pool *pgxpool.Pool, memberID, name string) error {
+	_, err := pool.Exec(
+		ctx,
+		`UPDATE members SET push_name = $2 WHERE wa_id = $1 AND push_name IS DISTINCT FROM $2`,
+		memberID, name,
+	)
+	return err
+}
+
 // ListStoredGroups lists the groups saved in database
 func ListStoredGroups(ctx context.Context, pool *pgxpool.Pool) ([]StoredGroup, error) {
 	rows, err := pool.Query(
 		ctx,
-		`SELECT wa_id, name, managed, synced_at FROM groups ORDER BY name`,
+		`SELECT wa_id, name, managed, synced_at, closed_at FROM groups ORDER BY name`,
 	)
 	if err != nil {
 		return nil, err
@@ -59,7 +70,7 @@ func ListStoredGroups(ctx context.Context, pool *pgxpool.Pool) ([]StoredGroup, e
 func UpdateManaged(ctx context.Context, pool *pgxpool.Pool, groupID string, managed bool) (bool, error) {
 	tag, err := pool.Exec(
 		ctx,
-		`UPDATE groups SET managed = $2 WHERE wa_id = $1`,
+		`UPDATE groups SET managed = $2 WHERE wa_id = $1 AND closed_at IS NULL`,
 		groupID, managed,
 	)
 	return tag.RowsAffected() > 0, err
@@ -146,7 +157,7 @@ func ReturnedMembers(ctx context.Context, pool *pgxpool.Pool, groupID string) ([
 }
 
 // CreateRemovalJob saves the Job and Items
-func CreateRemovalJob(ctx context.Context, pool *pgxpool.Pool, sessionID, groupID, requestedBy string, members []string) (int64, error) {
+func CreateRemovalJob(ctx context.Context, pool *pgxpool.Pool, sessionID, groupID, requestedBy string, members []string, closeGroup bool) (int64, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return 0, err
@@ -158,8 +169,9 @@ func CreateRemovalJob(ctx context.Context, pool *pgxpool.Pool, sessionID, groupI
 	err = tx.QueryRow(
 		ctx,
 		`
-		INSERT INTO removal_jobs (session_id, group_wa_id, requested_by) VALUES ($1, $2, NULLIF($3, '')) RETURNING id
-		`, sessionID, groupID, requestedBy,
+		INSERT INTO removal_jobs (session_id, group_wa_id, requested_by, close_group)
+		VALUES ($1, $2, NULLIF($3, ''), $4) RETURNING id
+		`, sessionID, groupID, requestedBy, closeGroup,
 	).Scan(&jobID)
 	if err != nil {
 		return 0, err
@@ -216,14 +228,132 @@ func RemovalJobs(ctx context.Context, pool *pgxpool.Pool, groupID string) ([]Rem
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[RemovalJob])
 }
 
-// RemovalJobInfo returns when and by whom a removal job was created
-func RemovalJobInfo(ctx context.Context, pool *pgxpool.Pool, jobID int64) (createdAt time.Time, requestedBy *string, err error) {
+// RemovalJobInfo returns when and by whom a removal job was created, and if it closes the group
+func RemovalJobInfo(ctx context.Context, pool *pgxpool.Pool, jobID int64) (createdAt time.Time, requestedBy *string, closeGroup bool, err error) {
 	err = pool.QueryRow(
 		ctx,
-		`SELECT created_at, requested_by FROM removal_jobs WHERE id = $1`,
+		`SELECT created_at, requested_by, close_group FROM removal_jobs WHERE id = $1`,
 		jobID,
-	).Scan(&createdAt, &requestedBy)
-	return createdAt, requestedBy, err
+	).Scan(&createdAt, &requestedBy, &closeGroup)
+	return createdAt, requestedBy, closeGroup, err
+}
+
+// ActiveRemovals lists the removal jobs that still have pending items
+func ActiveRemovals(ctx context.Context, pool *pgxpool.Pool) ([]ActiveRemoval, error) {
+	rows, err := pool.Query(
+		ctx,
+		`
+		SELECT j.id, j.group_wa_id, j.close_group, count(*) AS pending
+		FROM removal_jobs j
+		JOIN removal_items i ON i.job_id = j.id
+		WHERE i.status = 'pending'
+		GROUP BY j.id
+		ORDER BY j.id
+		`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[ActiveRemoval])
+}
+
+// HasPendingRemoval says if the group has a removal still running
+func HasPendingRemoval(ctx context.Context, pool *pgxpool.Pool, groupID string) (bool, error) {
+	var ok bool
+	err := pool.QueryRow(
+		ctx,
+		`
+		SELECT EXISTS (
+			SELECT 1 FROM removal_items i JOIN removal_jobs j ON j.id = i.job_id
+			WHERE j.group_wa_id = $1 AND i.status = 'pending'
+		)
+		`, groupID,
+	).Scan(&ok)
+	return ok, err
+}
+
+// ClosingsReady lists the close jobs that finished without cancel and whose group is still open:
+// the bot must leave these groups
+func ClosingsReady(ctx context.Context, pool *pgxpool.Pool) ([]Closing, error) {
+	rows, err := pool.Query(
+		ctx,
+		`
+		SELECT DISTINCT j.session_id, j.group_wa_id
+		FROM removal_jobs j
+		JOIN groups g ON g.wa_id = j.group_wa_id
+		WHERE j.close_group
+		  AND g.closed_at IS NULL
+		  AND NOT EXISTS (
+			SELECT 1 FROM removal_items i
+			WHERE i.job_id = j.id AND i.status IN ('pending', 'canceled')
+		  )
+		`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[Closing])
+}
+
+// MarkGroupClosed records the group as closed, it stops being managed
+func MarkGroupClosed(ctx context.Context, pool *pgxpool.Pool, groupID string) error {
+	_, err := pool.Exec(
+		ctx,
+		`UPDATE groups SET closed_at = now(), managed = false WHERE wa_id = $1`,
+		groupID,
+	)
+	return err
+}
+
+// SearchPeople finds members by number or name and returns, for each one, the groups
+// where the last event says they are in (present) or out
+func SearchPeople(ctx context.Context, pool *pgxpool.Pool, q string) ([]Person, error) {
+	// q is matched with LIKE, escape its wildcards so "%" or "_" are searched literally
+	pattern := "%" + strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(q) + "%"
+
+	rows, err := pool.Query(
+		ctx,
+		`
+		WITH m AS (
+			SELECT wa_id, number, push_name FROM members
+			WHERE number LIKE $1 OR push_name ILIKE $1
+			ORDER BY push_name NULLS LAST, number
+			LIMIT 20
+		), last AS (
+			SELECT DISTINCT ON (e.group_wa_id, e.member_wa_id) e.group_wa_id, e.member_wa_id, e.action, e.occurred_at
+			FROM membership_events e
+			JOIN m ON m.wa_id = e.member_wa_id
+			ORDER BY e.group_wa_id, e.member_wa_id, e.occurred_at DESC, e.id DESC
+		)
+		SELECT m.wa_id, m.number, m.push_name, l.group_wa_id, g.name,
+		       l.action IN ('join', 'seen') AS present, l.occurred_at
+		FROM m
+		JOIN last l ON l.member_wa_id = m.wa_id
+		JOIN groups g ON g.wa_id = l.group_wa_id
+		ORDER BY m.push_name NULLS LAST, m.number, present DESC, g.name
+		`, pattern,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	// one row per (person, group): group them by person keeping the query order
+	var people []Person
+	for rows.Next() {
+		var p Person
+		var g PersonGroup
+		if err := rows.Scan(&p.ID, &p.Number, &p.PushName, &g.GroupID, &g.Name, &g.Present, &g.Since); err != nil {
+			return nil, err
+		}
+		if n := len(people); n > 0 && people[n-1].ID == p.ID {
+			people[n-1].Groups = append(people[n-1].Groups, g)
+			continue
+		}
+		p.Groups = []PersonGroup{g}
+		people = append(people, p)
+	}
+	return people, rows.Err()
 }
 
 // CancelRemovalJob cancels the pending items of a job, returns how many were canceled

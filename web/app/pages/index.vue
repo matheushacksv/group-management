@@ -105,11 +105,15 @@ async function syncGroup(group: StoredGroup) {
         <template #name-cell="{ row }">
           <div class="flex items-center gap-3 min-w-0">
             <UAvatar icon="i-lucide-users" size="sm" :class="row.original.managed ? 'text-primary' : ''" />
-            <span class="truncate font-medium text-highlighted">{{ row.original.name }}</span>
+            <span class="truncate font-medium" :class="row.original.closedAt ? 'text-muted line-through' : 'text-highlighted'">{{ row.original.name }}</span>
           </div>
         </template>
         <template #managed-cell="{ row }">
+          <UTooltip v-if="row.original.closedAt" :text="`Encerrado ${timeAgo(row.original.closedAt)}`">
+            <UBadge color="neutral" variant="subtle" icon="i-lucide-power" label="Encerrado" />
+          </UTooltip>
           <USwitch
+            v-else
             :model-value="row.original.managed"
             :loading="syncingGroup === row.original.id"
             :disabled="syncingGroup === row.original.id"
@@ -122,7 +126,7 @@ async function syncGroup(group: StoredGroup) {
         <template #actions-cell="{ row }">
           <div class="flex justify-end">
             <UButton
-              v-if="row.original.managed"
+              v-if="row.original.managed || row.original.closedAt"
               :to="`/groups/${row.original.id}`"
               label="Abrir"
               trailing-icon="i-lucide-chevron-right"
