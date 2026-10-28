@@ -2,6 +2,7 @@ package groups
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -293,6 +294,66 @@ func ClosingsReady(ctx context.Context, pool *pgxpool.Pool) ([]Closing, error) {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[Closing])
+}
+
+var errGroupNotClosed = errors.New("group is not closed")
+
+// DeleteClosedGroup erases a closed group and everything about it: removals, membership history
+// and the members that are in no other group. Returns false if the group doesn't exist
+func DeleteClosedGroup(ctx context.Context, pool *pgxpool.Pool, groupID string) (bool, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+
+	// lock the row: a sync or webhook can't touch the group while it's being deleted
+	var closedAt *time.Time
+	err = tx.QueryRow(ctx, `SELECT closed_at FROM groups WHERE wa_id = $1 FOR UPDATE`, groupID).Scan(&closedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if closedAt == nil {
+		return true, errGroupNotClosed
+	}
+
+	_, err = tx.Exec(ctx, `
+		DELETE FROM removal_items
+		WHERE job_id IN (SELECT id FROM removal_jobs WHERE group_wa_id = $1)
+	`, groupID)
+	if err != nil {
+		return true, err
+	}
+	if _, err = tx.Exec(ctx, `DELETE FROM removal_jobs WHERE group_wa_id = $1`, groupID); err != nil {
+		return true, err
+	}
+
+	rows, err := tx.Query(ctx, `DELETE FROM membership_events WHERE group_wa_id = $1 RETURNING member_wa_id`, groupID)
+	if err != nil {
+		return true, err
+	}
+	affected, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return true, err
+	}
+
+	// separate statement on purpose: it must see the events deleted above
+	_, err = tx.Exec(ctx, `
+		DELETE FROM members m
+		WHERE m.wa_id = ANY ($1::text[])
+		  AND NOT EXISTS (SELECT 1 FROM membership_events e WHERE e.member_wa_id = m.wa_id)
+	`, affected)
+	if err != nil {
+		return true, err
+	}
+
+	if _, err = tx.Exec(ctx, `DELETE FROM groups WHERE wa_id = $1`, groupID); err != nil {
+		return true, err
+	}
+	return true, tx.Commit(ctx)
 }
 
 // MarkGroupClosed records the group as closed, it stops being managed

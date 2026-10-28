@@ -67,6 +67,7 @@ func main() {
 	protected.POST("/groups/:sessionID/:groupID/removals", groupHandler.CreateRemoval)
 	protected.GET("/groups/:sessionID/:groupID/removals", groupHandler.ListRemovals)
 	protected.POST("/groups/:sessionID/:groupID/close", groupHandler.CloseGroup)
+	protected.DELETE("/groups/:sessionID/:groupID", groupHandler.DeleteGroup)
 	protected.GET("/removals/active", groupHandler.ActiveRemovals)
 	protected.GET("/removals/:id", groupHandler.GetRemoval)
 	protected.POST("/removals/:id/cancel", groupHandler.CancelRemoval)

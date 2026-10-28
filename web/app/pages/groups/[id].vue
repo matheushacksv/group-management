@@ -30,8 +30,12 @@ const returnedColumns: TableColumn<ReturnedMember>[] = [
 ]
 
 const closeOpen = ref(false)
+const deleteOpen = ref(false)
+// active group: can be closed; closed group: can be deleted from the panel
 const actions = computed(() => [[
-  { label: 'Encerrar grupo', icon: 'i-lucide-power', color: 'error' as const, onSelect: () => { closeOpen.value = true } }
+  group.value?.closedAt
+    ? { label: 'Excluir do painel', icon: 'i-lucide-trash-2', color: 'error' as const, onSelect: () => { deleteOpen.value = true } }
+    : { label: 'Encerrar grupo', icon: 'i-lucide-power', color: 'error' as const, onSelect: () => { closeOpen.value = true } }
 ]])
 
 const jobColumns: TableColumn<RemovalJob>[] = [
@@ -55,12 +59,13 @@ const jobColumns: TableColumn<RemovalJob>[] = [
           <UBadge v-else-if="group && !group.managed" color="warning" variant="subtle" label="Não gerenciado" />
         </template>
         <template #right>
-          <UDropdownMenu v-if="group?.managed && !group.closedAt" :items="actions" :content="{ align: 'end' }">
+          <UDropdownMenu v-if="group?.managed || group?.closedAt" :items="actions" :content="{ align: 'end' }">
             <UButton icon="i-lucide-ellipsis-vertical" color="neutral" variant="ghost" aria-label="Mais ações" />
           </UDropdownMenu>
         </template>
       </UDashboardNavbar>
-      <CloseGroupModal v-if="group" v-model:open="closeOpen" :group="group" />
+      <CloseGroupModal v-if="group && !group.closedAt" v-model:open="closeOpen" :group="group" />
+      <DeleteGroupModal v-if="group?.closedAt" v-model:open="deleteOpen" :group="group" />
     </template>
 
     <template #body>

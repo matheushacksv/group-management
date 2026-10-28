@@ -18,6 +18,14 @@ const filtered = computed(() => {
 
 const managedCount = computed(() => groups.value.filter(g => g.managed).length)
 
+// closed group picked to be deleted from the list
+const toDelete = ref<StoredGroup>()
+const deleteOpen = ref(false)
+function askDelete(group: StoredGroup) {
+  toDelete.value = group
+  deleteOpen.value = true
+}
+
 const columns: TableColumn<StoredGroup>[] = [
   { accessorKey: 'name', header: 'Grupo' },
   { accessorKey: 'managed', header: 'Gerenciado' },
@@ -124,7 +132,17 @@ async function syncGroup(group: StoredGroup) {
           <TimeAgo :date="row.original.syncedAt" class="text-muted" />
         </template>
         <template #actions-cell="{ row }">
-          <div class="flex justify-end">
+          <div class="flex justify-end gap-1">
+            <UTooltip v-if="row.original.closedAt" text="Excluir do painel">
+              <UButton
+                icon="i-lucide-trash-2"
+                color="error"
+                variant="ghost"
+                size="sm"
+                aria-label="Excluir do painel"
+                @click="askDelete(row.original)"
+              />
+            </UTooltip>
             <UButton
               v-if="row.original.managed || row.original.closedAt"
               :to="`/groups/${row.original.id}`"
@@ -139,6 +157,8 @@ async function syncGroup(group: StoredGroup) {
           <UEmpty icon="i-lucide-users" title="Nenhum grupo" description="Clique em Sincronizar para buscar os grupos." />
         </template>
       </UTable>
+
+      <DeleteGroupModal v-if="toDelete" v-model:open="deleteOpen" :group="toDelete" />
     </template>
   </UDashboardPanel>
 </template>

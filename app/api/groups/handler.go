@@ -258,6 +258,23 @@ func (g GroupHandler) SyncGroup(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+// DeleteGroup handles http and erases a closed group from the system (WhatsApp is not touched:
+// the bot already left it when it was closed)
+func (g GroupHandler) DeleteGroup(c *gin.Context) {
+	found, err := DeleteClosedGroup(c.Request.Context(), g.Pool, c.Param("groupID"))
+	switch {
+	case errors.Is(err, errGroupNotClosed):
+		c.JSON(http.StatusConflict, gin.H{"error": "só grupos encerrados podem ser excluídos"})
+	case err != nil:
+		log.Printf("delete group: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+	case !found:
+		c.JSON(http.StatusNotFound, gin.H{"error": "group not found"})
+	default:
+		c.Status(http.StatusNoContent)
+	}
+}
+
 // saveSenderName stores the name of who sent a message in a managed group.
 // WhatsApp only exposes the name of people who interact, so names fill up as members talk.
 // Errors are only logged: a missing name is not worth an OpenWA retry
