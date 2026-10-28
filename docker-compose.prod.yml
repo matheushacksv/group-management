@@ -1,0 +1,77 @@
+# Production stack (Docker Swarm + Traefik), deploy with:
+#   docker build -t group-api:latest . && docker build -t group-web:latest ./web
+#   docker stack deploy -c docker-compose.prod.yml groups
+#
+# Only the web is public. The API and the database stay on internal networks:
+# - web -> api through the stack network
+# - api <-> OpenWA through OHenriquecedorNet (alias groups-api), no Traefik in the middle,
+#   so the webhook token never shows up in the Traefik access log
+
+services:
+  db:
+    image: postgres:17-alpine
+    env_file: ./.env
+    networks: [default]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+  api:
+    image: group-api:latest
+    env_file: ./.env
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      PORT: "8088"
+    networks:
+      default:
+      traefik:
+        aliases: [groups-api]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8088/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    # graceful shutdown waits up to 30s for requests + the removal in progress
+    stop_grace_period: 45s
+    deploy:
+      # one replica on purpose: one removal worker = global throttle against WhatsApp ban
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+  web:
+    image: group-web:latest
+    env_file: ./web/.env
+    environment:
+      NUXT_API_BASE: http://api:8088
+    networks: [default, traefik]
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.groups-app.rule=Host(`grupos.henriquegoularte.com.br`)"
+        - "traefik.http.routers.groups-app.entrypoints=websecure"
+        - "traefik.http.routers.groups-app.tls.certresolver=letsencryptresolver"
+        - "traefik.http.services.groups-app.loadbalancer.server.port=3000"
+
+networks:
+  default:
+  traefik:
+    external: true
+    name: OHenriquecedorNet
+
+volumes:
+  postgres_data:

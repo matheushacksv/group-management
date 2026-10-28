@@ -22,9 +22,8 @@ type Config struct {
 
 // Load get .env
 func Load() (Config, error) {
-	if err := godotenv.Load(); err != nil {
-		return Config{}, err
-	}
+	// .env is optional: in production (docker) the vars come from the environment
+	_ = godotenv.Load()
 
 	port := os.Getenv("PORT")
 	DBName := os.Getenv("POSTGRES_DB")
